@@ -1,0 +1,20 @@
+services:
+  crm-api:
+    build:
+      context: .
+      dockerfile: crm/Dockerfile
+    container_name: exelio-crm-api
+    ports:
+      - "8000:8000"
+    environment:
+      CRM_DB_PATH: /app/data/crm.db
+      CRM_API_URL: http://127.0.0.1:8000
+    env_file:
+      - .env
+    volumes:
+      # Живой код — правки на хосте сразу в контейнере + uvicorn --reload (watchdog)
+      - ./crm:/app/crm
+      - ./data:/app/data
+    restart: unless-stopped
+    stdin_open: true
+    tty: true

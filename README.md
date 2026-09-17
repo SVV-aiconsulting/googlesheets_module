@@ -1,22 +1,39 @@
-# Google Sheets Module
+# Exelio — Google Sheets/Drive + Mini-CRM
 
-Переиспользуемый Python-клиент для Google Sheets (service account) и простое Tkinter-приложение, которое формирует демо-отчёт и записывает его в таблицу с оформлением «как документ».
+Монорепозиторий: клиенты Google Sheets/Drive, мини-CRM (SQLite + FastAPI + Docker) и Tkinter UI с выгрузкой отчётов в Google Sheets от имени пользователя (OAuth).
 
 ## Возможности
 
-- CRUD по значениям листа: чтение, запись, append, clear, удаление строк
-- Форматирование через `batchUpdate` (merge, стили, ширины колонок, новые листы)
-- Настройки из `.env` (`GOOGLE_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`)
-- GUI `report_app.py`: даты, подразделение, автор, тип отчёта → случайные данные → новый лист в таблице
+**Google Sheets** (`integrations/google_sheets_client.py`)
+- CRUD значений, форматирование (`batchUpdate`), листы
+- Авторизация: service account или OAuth
+
+**Google Drive** (`integrations/google_drive_client.py`)
+- Список / создание / удаление файлов и папок
+- Создание Google Docs и Google Sheets в рабочей папке
+- Service account или OAuth (личный аккаунт)
+- CLI-меню: `integrations/drive_cli.py`
+
+**Mini-CRM**
+- Таблицы: клиенты, сделки, задачи (SQLite)
+- FastAPI REST API + Swagger
+- Docker Compose с hot-reload (`watchdog` / `uvicorn --reload`)
+- Tkinter UI: таблицы, поиск, CRUD, настройки Google, выгрузка отчёта в новую Google-таблицу
 
 ## Структура
 
-| Файл | Назначение |
-|------|------------|
-| `google_sheets_client.py` | Клиент Google Sheets API |
-| `report_app.py` | Tkinter-приложение генерации отчётов |
-| `.env.example` | Шаблон переменных окружения |
-| `requirements.txt` | Зависимости |
+```text
+Exelio/
+  credentials/           # секреты (НЕ в git): SA JSON, client_secret, token
+  integrations/          # Google Sheets / Drive / drive_cli / report_app
+  crm/                   # модели, SQLite CRUD, FastAPI, Dockerfile
+  ui/                    # Tkinter CRM-клиент + выгрузка отчётов
+  data/                  # crm.db, google_gui_settings.txt (НЕ в git)
+  crm.py                 # локальный запуск API
+  docker-compose.yml
+  seed_crm_data.py       # тестовое наполнение API (~1000 записей × 3)
+  .env.example
+```
 
 ## Быстрый старт
 
@@ -28,102 +45,126 @@ python -m venv .venv
 # Windows
 .venv\Scripts\activate
 
-# macOS / Linux
-source .venv/bin/activate
-
 pip install -r requirements.txt
-```
-
-### 2. Service Account
-
-1. Создайте service account в Google Cloud и скачайте JSON-ключ.
-2. Положите файл в корень проекта (по умолчанию клиент ищет `vibecode-*.json` рядом с модулем — при необходимости поправьте путь `DEFAULT_CREDENTIALS_PATH` в `google_sheets_client.py`).
-3. Создайте Google-таблицу и **расшарьте** её на email service account с правом редактора.
-
-### 3. Настройки `.env`
-
-```bash
 copy .env.example .env
 ```
 
-Заполните:
+Положите ключи в `credentials/` и пропишите пути в `.env` (см. `.env.example`).
 
-```env
-GOOGLE_SPREADSHEET_ID=ваш_id_из_url_таблицы
-GOOGLE_SERVICE_ACCOUNT_EMAIL=ваш-sa@project.iam.gserviceaccount.com
-```
-
-ID таблицы — фрагмент из URL:
-
-`https://docs.google.com/spreadsheets/d/ВОТ_ЭТОТ_ID/edit`
-
-### 4. Проверка доступа
+### 2. CRM API (Docker, рекомендуется)
 
 ```bash
-python google_sheets_client.py
+docker compose up --build
 ```
 
-### 5. Генератор отчётов
+- Docs: http://127.0.0.1:8000/docs  
+- Health: http://127.0.0.1:8000/health  
+- Код `crm/` смонтирован в контейнер — правки подхватываются без пересборки
+
+Локально без Docker:
 
 ```bash
-python report_app.py
+python crm.py
 ```
 
-Укажите период и поля → «Сформировать и записать в Google Sheets».  
-Будет создан новый лист с заголовком, метаданными, KPI и таблицей; даты пишутся как значения Sheets в формате `дд.мм.гггг`.
+### 3. Tkinter UI
 
-## Использование клиента в коде
-
-```python
-from google_sheets_client import GoogleSheetsClient, DEFAULT_SPREADSHEET_ID
-
-client = GoogleSheetsClient()  # ID из .env
-# или явно:
-# client = GoogleSheetsClient(spreadsheet_id="...")
-
-rows = client.read_all()
-client.write_values([["A", "B"], [1, 2]], range_a1="A1")
-client.append_rows([[3, 4]])
-client.clear_range("A1:B10")
-
-# Новый лист + форматирование
-sheet_id = client.create_sheet("Отчёт")
-client.batch_update([
-    {
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": 0,
-                "endRowIndex": 1,
-                "startColumnIndex": 0,
-                "endColumnIndex": 3,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "textFormat": {"bold": True},
-                }
-            },
-            "fields": "userEnteredFormat.textFormat.bold",
-        }
-    }
-])
+```bash
+python ui/crm_app.py
 ```
+
+В UI:
+1. **Настройки Google** — OAuth `client_secret`, `token.json`, ID папки Drive (+ кнопка «Вставить»)
+2. Настройки сохраняются в `data/google_gui_settings.txt`
+3. На вкладках **Клиенты / Сделки / Задачи** — кнопка **Выгрузить отчёт**
+4. Создаётся Google Sheet в вашей папке (OAuth), данные пишутся через Sheets API, в конце — ссылка и кнопка **Открыть**
+
+### 4. Тестовые данные
+
+API должен быть запущен:
+
+```bash
+python seed_crm_data.py
+```
+
+~1000 реалистичных клиентов, сделок и задач через HTTP. Затем в UI — **Обновить всё**.
+
+## Google: важные нюансы
+
+### `GOOGLE_DRIVE_FOLDER_ID`
+
+**Не обязателен** для списка файлов Drive.  
+**Нужен**, чтобы:
+- фильтровать список по одной папке;
+- создавать Docs/Sheets и CRM-отчёты именно в эту папку.
+
+ID — хвост URL: `https://drive.google.com/drive/folders/ВОТ_ЭТОТ_ID`
+
+### OAuth (личный аккаунт)
+
+Выгрузка отчётов из GUI идёт через **OAuth в desktop-приложении**, не на сервере — файлы создаются от вашего Google-аккаунта.
+
+1. Google Cloud Console → OAuth Client (Desktop) → скачать `client_secret*.json` в `credentials/`
+2. Добавьте себя в **Test users**, если приложение в статусе Testing
+3. При первом экспорте откроется браузер; токен сохранится в `credentials/token.json`
+4. Нужны scope Drive **и** Sheets; при смене scope старый token сбрасывается автоматически
+
+### Service account
+
+Для фоновых сценариев Sheets/Drive (SA): расшарьте таблицу/папку на email из `GOOGLE_SERVICE_ACCOUNT_EMAIL`.
+
+Пути к ключам **только из `.env` / настроек GUI** — в коде нет захардкоженных путей к JSON.
+
+## API CRM (кратко)
+
+| Метод | Путь | Назначение |
+|-------|------|------------|
+| GET/POST | `/clients` | список / создать |
+| GET | `/clients/search?q=` | поиск (без учёта регистра, кириллица) |
+| PATCH/DELETE | `/clients/{id}` | обновить / удалить |
+| POST | `/clients/{id}/archive` \| `/restore` | архив |
+| GET/POST | `/deals`, `/tasks` | аналогично |
+| POST | `/deals/{id}/attach-client` | привязать клиента |
+| POST | `/tasks/{id}/done` | отметить задачу |
 
 ## Переменные окружения
 
-| Переменная | Описание |
-|------------|----------|
-| `GOOGLE_SPREADSHEET_ID` | ID целевой Google-таблицы |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Email service account (для справки / шаринга) |
+| Переменная | Обязательно? | Описание |
+|------------|--------------|----------|
+| `GOOGLE_CREDENTIALS_PATH` | для SA | путь к JSON service account |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | нет | email SA |
+| `GOOGLE_SPREADSHEET_ID` | для Sheets SA | ID таблицы |
+| `GOOGLE_DRIVE_FOLDER_ID` | для создания в папке | ID рабочей папки |
+| `GOOGLE_OAUTH_CLIENT_SECRET_PATH` | для OAuth | `client_secret*.json` |
+| `GOOGLE_OAUTH_TOKEN_PATH` | нет | `token.json` (по умолчанию в credentials/) |
+| `CRM_DB_PATH` | нет | путь к SQLite (`data/crm.db`) |
+| `CRM_API_URL` | нет | URL API для UI (`http://127.0.0.1:8000`) |
 
-Приоритет ID: аргумент конструктора / CLI → `.env` / окружение.
+## Безопасность — не коммитить
 
-## Безопасность
-
-В репозиторий **не** коммитьте:
+В `.gitignore` уже исключено:
 
 - `.env`
-- JSON-ключ service account
+- `credentials/`
+- `*.json` ключи / `token.json`
+- `data/` (БД и GUI-настройки Google)
 - `.venv/`
 
-См. `.gitignore`.
+В git попадает только `.env.example` с плейсхолдерами.
+
+## Полезные команды
+
+```bash
+# Drive: список файлов
+python integrations/google_drive_client.py
+
+# Drive: интерактивное меню
+python integrations/drive_cli.py
+
+# Sheets demo-отчёт (Tkinter)
+python integrations/report_app.py
+
+# CRM API + UI
+docker compose up --build
+python ui/crm_app.py
+```

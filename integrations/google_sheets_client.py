@@ -17,29 +17,62 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-_PROJECT_DIR = Path(__file__).resolve().parent
+_PROJECT_DIR = Path(__file__).resolve().parent.parent  # корень репозитория
 load_dotenv(_PROJECT_DIR / ".env")
 
-# Путь к JSON-ключу service account в этом проекте (по умолчанию).
-DEFAULT_CREDENTIALS_PATH = _PROJECT_DIR / "vibecode-508812-3d0fc1f895b3.json"
+AuthMode = Literal["service_account", "oauth"]
+PathLike = Union[str, Path]
 
-# ---------------------------------------------------------------------------
-# Конфиг из .env / окружения
-#
-# Приоритет ID таблицы:
-#   1) переменная окружения / .env → GOOGLE_SPREADSHEET_ID
-#   2) аргумент CLI --spreadsheet-id / параметр конструктора
-# ---------------------------------------------------------------------------
+# Те же scope, что у Drive — один OAuth-токен на создание + запись.
+SCOPES = (
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+)
+
+Values = Sequence[Sequence[Any]]
+_PLACEHOLDER_IDS = frozenset({"", "YOUR_SPREADSHEET_ID", "ВОТ_ЭТОТ_ID"})
 
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
+
+
+def _resolve_path(env_name: str, cli_value: Optional[str] = None) -> Path:
+    """CLI → .env (обязательно). Без захардкоженных путей."""
+    if cli_value and str(cli_value).strip():
+        path = Path(str(cli_value).strip()).expanduser()
+    else:
+        env_path = _env(env_name)
+        if not env_path:
+            raise ValueError(
+                f"Не задан {env_name}. Укажите путь в .env "
+                "или в настройках Google в CRM."
+            )
+        path = Path(env_path).expanduser()
+    if not path.is_absolute():
+        path = _PROJECT_DIR / path
+    return path
+
+
+def _resolve_credentials_path(cli_value: Optional[str] = None) -> Path:
+    return _resolve_path("GOOGLE_CREDENTIALS_PATH", cli_value)
+
+
+def _resolve_oauth_client_path(cli_value: Optional[str] = None) -> Path:
+    return _resolve_path("GOOGLE_OAUTH_CLIENT_SECRET_PATH", cli_value)
+
+
+def _resolve_oauth_token_path(cli_value: Optional[str] = None) -> Path:
+    return _resolve_path("GOOGLE_OAUTH_TOKEN_PATH", cli_value)
 
 
 def _resolve_spreadsheet_id(cli_value: Optional[str] = None) -> str:
@@ -55,40 +88,120 @@ def _resolve_spreadsheet_id(cli_value: Optional[str] = None) -> str:
 DEFAULT_SPREADSHEET_ID = _resolve_spreadsheet_id()
 SERVICE_ACCOUNT_EMAIL = _env("GOOGLE_SERVICE_ACCOUNT_EMAIL")
 
-SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
 
-Values = Sequence[Sequence[Any]]
-PathLike = Union[str, Path]
+def _scopes_ok(creds: Optional[UserCredentials]) -> bool:
+    if not creds:
+        return False
+    granted = {s.rstrip("/") for s in (creds.scopes or [])}
+    needed = {s.rstrip("/") for s in SCOPES}
+    return needed.issubset(granted)
 
-_PLACEHOLDER_IDS = frozenset({"", "YOUR_SPREADSHEET_ID", "ВОТ_ЭТОТ_ID"})
+
+def _load_oauth_credentials(
+    client_secret_path: Path,
+    token_path: Path,
+) -> UserCredentials:
+    from google.auth.exceptions import RefreshError
+
+    if not client_secret_path.is_file():
+        raise FileNotFoundError(
+            f"OAuth client secret не найден: {client_secret_path}. "
+            "Задайте GOOGLE_OAUTH_CLIENT_SECRET_PATH в .env."
+        )
+
+    creds: Optional[UserCredentials] = None
+    if token_path.is_file():
+        creds = UserCredentials.from_authorized_user_file(str(token_path), list(SCOPES))
+
+    if creds and creds.valid and _scopes_ok(creds):
+        return creds
+
+    if creds and creds.expired and creds.refresh_token and _scopes_ok(creds):
+        try:
+            creds.refresh(Request())
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+            return creds
+        except RefreshError:
+            creds = None
+
+    if token_path.is_file():
+        try:
+            token_path.unlink()
+        except OSError:
+            pass
+
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(client_secret_path),
+        scopes=list(SCOPES),
+    )
+    creds = flow.run_local_server(port=0)
+
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(creds.to_json(), encoding="utf-8")
+    return creds
 
 
 class GoogleSheetsClient:
-    """CRUD-помощник для одной Google-таблицы (service account)."""
+    """CRUD-помощник для одной Google-таблицы (service account или OAuth)."""
 
     def __init__(
         self,
         spreadsheet_id: Optional[str] = None,
-        credentials_path: PathLike = DEFAULT_CREDENTIALS_PATH,
+        *,
+        auth: AuthMode = "service_account",
+        credentials_path: Optional[PathLike] = None,
+        oauth_client_secret_path: Optional[PathLike] = None,
+        oauth_token_path: Optional[PathLike] = None,
         sheet_name: Optional[str] = None,
     ) -> None:
         """
         Args:
-            spreadsheet_id: ID целевой таблицы. Если не указан — из .env
-                (GOOGLE_SPREADSHEET_ID).
-            credentials_path: Путь к JSON-ключу service account.
-            sheet_name: Название листа. Если не указано — берётся первый лист.
+            spreadsheet_id: ID целевой таблицы. Если не указан — из .env.
+            auth: ``service_account`` или ``oauth``.
+            credentials_path: JSON service account (режим SA).
+            oauth_client_secret_path / oauth_token_path: OAuth (режим oauth).
+            sheet_name: Название листа. Если не указано — первый лист.
         """
         sid = (spreadsheet_id or "").strip() or DEFAULT_SPREADSHEET_ID
         if not sid or sid in _PLACEHOLDER_IDS:
             raise ValueError(
                 "Не указан ID таблицы. Задайте GOOGLE_SPREADSHEET_ID в файле .env "
-                "(см. .env.example), либо передайте spreadsheet_id / --spreadsheet-id."
+                "или передайте spreadsheet_id."
             )
 
+        self.auth: AuthMode = auth
         self.spreadsheet_id = sid
-        self.credentials_path = Path(credentials_path)
         self._sheet_name = sheet_name
+
+        if credentials_path is not None:
+            self.credentials_path = Path(credentials_path)
+        elif auth == "service_account":
+            self.credentials_path = _resolve_credentials_path()
+        else:
+            self.credentials_path = Path()
+
+        if oauth_client_secret_path is not None:
+            self.oauth_client_secret_path = Path(oauth_client_secret_path)
+        elif auth == "oauth":
+            self.oauth_client_secret_path = _resolve_oauth_client_path()
+        else:
+            self.oauth_client_secret_path = Path()
+
+        if oauth_token_path is not None:
+            self.oauth_token_path = Path(oauth_token_path)
+        elif auth == "oauth":
+            self.oauth_token_path = _resolve_oauth_token_path()
+        else:
+            self.oauth_token_path = Path()
+
+        if self.credentials_path and not self.credentials_path.is_absolute():
+            self.credentials_path = _PROJECT_DIR / self.credentials_path
+        if self.oauth_client_secret_path and not self.oauth_client_secret_path.is_absolute():
+            self.oauth_client_secret_path = _PROJECT_DIR / self.oauth_client_secret_path
+        if self.oauth_token_path and not self.oauth_token_path.is_absolute():
+            self.oauth_token_path = _PROJECT_DIR / self.oauth_token_path
+
         self._service = self._build_service()
         if self._sheet_name is None:
             self._sheet_name = self._first_sheet_title()
@@ -96,14 +209,22 @@ class GoogleSheetsClient:
     # ------------------------------------------------------------------ auth
 
     def _build_service(self):
-        if not self.credentials_path.is_file():
-            raise FileNotFoundError(
-                f"Файл учётных данных не найден: {self.credentials_path}"
+        if self.auth == "oauth":
+            creds = _load_oauth_credentials(
+                self.oauth_client_secret_path,
+                self.oauth_token_path,
             )
-        creds = Credentials.from_service_account_file(
-            str(self.credentials_path),
-            scopes=SCOPES,
-        )
+        elif self.auth == "service_account":
+            if not self.credentials_path.is_file():
+                raise FileNotFoundError(
+                    f"Файл учётных данных не найден: {self.credentials_path}"
+                )
+            creds = ServiceAccountCredentials.from_service_account_file(
+                str(self.credentials_path),
+                scopes=SCOPES,
+            )
+        else:
+            raise ValueError(f"Неизвестный auth={self.auth!r}")
         return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     def _first_sheet_title(self) -> str:
@@ -352,8 +473,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--credentials",
-        default=str(DEFAULT_CREDENTIALS_PATH),
-        help="Путь к JSON-ключу service account.",
+        default=None,
+        help="Путь к JSON-ключу service account (иначе GOOGLE_CREDENTIALS_PATH).",
     )
     parser.add_argument(
         "--sheet",

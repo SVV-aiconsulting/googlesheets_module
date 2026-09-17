@@ -2,19 +2,33 @@
 .env
 .env.local
 .env.*.local
+!.env.example
 
-# Google service account keys
+# Google keys, OAuth tokens, credentials folder
+credentials/
 *.json
 !package.json
+!tsconfig.json
 vibecode-*.json
+client_secret*.json
+token.json
 *credentials*.json
 *service_account*.json
+
+# Local CRM DB and GUI Google settings
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+google_gui_settings.txt
 
 # Python
 .venv/
 venv/
 env/
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -34,3 +48,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Docker / local overrides
+docker-compose.override.yml
